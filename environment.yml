@@ -1,0 +1,27 @@
+name: project_venv
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python==3.10.13
+  - conda=23.11.0
+  - scipy==1.11.1
+  - pandas==2.1.4
+  - statsmodels==0.14.0
+  - scikit-learn==1.3.0
+  - jupyter==1.0.0
+  - seaborn==0.12.2
+  - missingno==0.4.2
+  - scikit-surprise==1.1.3
+  - networkx==3.1
+  - mlxtend==0.23.0
+  - opencv==4.8.1
+  - umap-learn==0.5.5
+  - bokeh==3.3.2
+  - kneed==0.8.5
+  - matplotlib==3.8.2
+  - pingouin==0.5.3
+  - scikit-posthocs==0.8.1
+  - category_encoders==2.6.3
+  - imbalanced-learn==0.11.0
+prefix: C:\Users\steveMorin\miniconda3\envs\project_venv
