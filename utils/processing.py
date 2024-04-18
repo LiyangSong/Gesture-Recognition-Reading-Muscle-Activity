@@ -20,7 +20,7 @@ def split_numerical_nominal(df: pd.DataFrame) -> (list, list):
     return numerical_attrs, nominal_attrs
 
 
-def get_default_preprocessor(numerical_attrs: list, nominal_attrs: list) -> any:
+def get_default_preprocessor(numerical_attrs: list, nominal_attrs: list) -> ColumnTransformer:
     numerical_transformer = Pipeline([
         ('simple_imputer', SimpleImputer()),
         ('standard_scaler', StandardScaler())

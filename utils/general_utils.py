@@ -1,7 +1,8 @@
+import pandas as pd
 from sklearn.preprocessing import label_binarize
 
 
-def check_for_complete_unique_attrs(cap_x_df):
+def check_for_complete_unique_attrs(cap_x_df: pd.DataFrame) -> list:
 
     print(f'the data frame has {cap_x_df.shape[0]} rows\n')
 
@@ -16,7 +17,7 @@ def check_for_complete_unique_attrs(cap_x_df):
     return concern_list
 
 
-def label_binarize_(df, target_attr, print_results=True):
+def label_binarize_(df: pd.DataFrame, target_attr: str, print_results: bool = True) -> (pd.DataFrame, dict):
 
     if df[target_attr].nunique() == 1:
         print(f'df[target_attr].nunique() = {df[target_attr].nunique()} - this case is not implemented')
@@ -32,7 +33,11 @@ def label_binarize_(df, target_attr, print_results=True):
     return df, lb_name_mapping
 
 
-def label_binarize_binary(df, target_attr, neg_label=0, pos_label=1, print_results=True):
+def label_binarize_binary(df: pd.DataFrame,
+                          target_attr: str,
+                          neg_label: int = 0,
+                          pos_label: int = 1,
+                          print_results: bool = True) -> (pd.DataFrame, dict):
 
     if print_results:
         print(f'\ndf[target_attr] is a string attribute')
