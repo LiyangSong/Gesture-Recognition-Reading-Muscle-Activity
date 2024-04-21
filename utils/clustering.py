@@ -1,8 +1,5 @@
-import itertools
-
 import numpy as np
 import pandas as pd
-import matplotlib as mpl
 import umap
 from kneed import KneeLocator
 from matplotlib import pyplot as plt
@@ -11,21 +8,24 @@ from scipy.stats import linregress
 from sklearn.cluster import KMeans, DBSCAN
 import hdbscan.validity as dbcv_hdbscan
 from sklearn.manifold import trustworthiness
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score, adjusted_rand_score, \
-    rand_score
-from sklearn.metrics.cluster import contingency_matrix
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from sklearn.neighbors import KDTree
 import seaborn as sns
 
 
-def umap_dim_red(cap_x_df: pd.DataFrame, n_neighbors: int, min_dist: float, metric: str, n_components: int) -> dict:
+def umap_dim_red(
+        cap_x_df: pd.DataFrame,
+        n_neighbors: int = 15,
+        min_dist: float = 0.1,
+        metric: str = 'euclidean',
+        n_components: int = 2) -> dict:
     """
     Performs UMAP dimensionality reduction.
     Prepares data for clustering by reducing it to a lower-dimensional space
     while preserving its intrinsic structure.
     """
 
-    cap_x_df_copy = cap_x_df.drop(columns='id').copy()
+    cap_x_df_copy = cap_x_df.copy()
 
     transformer = umap.UMAP(
         n_neighbors=n_neighbors,
@@ -37,11 +37,12 @@ def umap_dim_red(cap_x_df: pd.DataFrame, n_neighbors: int, min_dist: float, metr
     embedding = transformer.fit_transform(cap_x_df_copy)
 
     twness = trustworthiness(
-        squareform(pdist(cap_x_df_copy)),
-        squareform(pdist(embedding))
+        X=squareform(pdist(cap_x_df_copy)),
+        X_embedded=squareform(pdist(embedding)),
+        metric=metric
     )
 
-    results_dict = {
+    umap_results_dict = {
         'embedding': embedding,
         'n_neighbors': n_neighbors,
         'min_dist': min_dist,
@@ -50,21 +51,122 @@ def umap_dim_red(cap_x_df: pd.DataFrame, n_neighbors: int, min_dist: float, metr
         'trustworthiness': twness
     }
 
-    return results_dict
+    return umap_results_dict
 
 
-def clustering(results_dict: dict) -> dict | None:
+def clustering(umap_results_dict: dict) -> dict | None:
     """
     Coordinates the clustering process by applying k-means and DBSCAN,
     then selecting the best method based on various metrics.
     """
 
-    embedding = results_dict['embedding'].copy()
+    embedding = umap_results_dict['embedding'].copy()
+    k_means_internal_indices_df = perform_k_means_and_get_internal_indices(embedding)
+    k_means_clustering_results_dict = get_k_means_clustering_results_dict(
+        k_means_internal_indices_df,
+        umap_results_dict
+    )
 
-    n_clusters_list = list(range(2, 16))
-    k_means_internal_indices_df = perform_k_means_and_get_internal_indices(embedding, n_clusters_list)
-    n_clusters_found = get_k_means_best_n_clusters(k_means_internal_indices_df)
+    if k_means_clustering_results_dict is not None:
+        return k_means_clustering_results_dict
 
+    else:
+        # k_means results not pass, try DBSCAN
+        print(f'\nTry applying DBSCAN method:')
+
+        embedding = umap_results_dict['embedding'].copy()
+        dbscan_internal_indices_df = perform_dbscan_and_get_internal_indices(
+            embedding,
+            metric=umap_results_dict['metric']
+        )
+        dbscan_clustering_results_dict = get_dbscan_clustering_results_dict(
+            dbscan_internal_indices_df,
+            umap_results_dict
+        )
+
+        return dbscan_clustering_results_dict
+
+
+def perform_k_means_and_get_internal_indices(
+        embedding: np.ndarray,
+        n_clusters_list: list = None,
+        random_state: int = 42) -> pd.DataFrame:
+    """
+    Performs k-means clustering and return the internal indices dataframe.
+    """
+
+    if n_clusters_list is None:
+        n_clusters_list = list(np.arange(2, 16))
+
+    internal_indices = []
+
+    for n_clusters in n_clusters_list:
+        embedding_copy = embedding.copy()
+        kmeans = KMeans(
+            n_clusters=n_clusters,
+            n_init='auto',
+            random_state=random_state
+        )
+        kmeans.fit_predict(embedding_copy)
+
+        internal_indices.append({
+            'n_clusters': n_clusters,
+            'inertia': kmeans.inertia_,
+            'calinski_harabasz_score': calinski_harabasz_score(embedding_copy, kmeans.labels_),
+            'davies_bouldin_score': davies_bouldin_score(embedding_copy, kmeans.labels_),
+            'silhouette_score': silhouette_score(embedding_copy, kmeans.labels_),
+            'hopkins_statistic': get_hopkins_statistic(embedding_copy),
+            'fitted_k_means': kmeans,
+            'cluster_labels': kmeans.labels_
+        })
+
+    return pd.DataFrame(internal_indices)
+
+
+def get_k_means_clustering_results_dict(k_means_internal_indices_df: pd.DataFrame, umap_results_dict: dict) -> dict | None:
+    """
+    Generate results dict based on the best k_means clustering index.
+    """
+
+    best_index_results_dict = get_k_means_best_index(k_means_internal_indices_df)
+
+    index_found = best_index_results_dict['index_found']
+    if index_found is None:
+        return None
+
+    k_means_clustering_results_dict = {
+        'algo': 'k_means',
+        'n_clusters_found': best_index_results_dict['n_clusters_found'],
+        'n_clusters_db_score_is_min': best_index_results_dict['n_clusters_db_score_is_min'],
+        'n_clusters_ch_score_is_max': best_index_results_dict['n_clusters_ch_score_is_max'],
+        'n_clusters_silhouette_score_is_max': best_index_results_dict['n_clusters_silhouette_score_is_max'],
+        'silhouette_score': k_means_internal_indices_df.loc[index_found, 'silhouette_score'].values[0],
+        'hopkins_statistic': k_means_internal_indices_df.loc[index_found, 'hopkins_statistic'].values[0],
+        'umap_n_neighbors': umap_results_dict['n_neighbors'],
+        'umap_min_dist': umap_results_dict['min_dist'],
+        'umap_metric': umap_results_dict['metric'],
+        'umap_n_components': umap_results_dict['n_components'],
+        'trustworthiness': umap_results_dict['trustworthiness'],
+        'fitted_k_means': k_means_internal_indices_df.loc[index_found, 'fitted_k_means'].values[0],
+        'embedding': umap_results_dict['embedding'].copy(),
+        'cluster_labels': k_means_internal_indices_df.loc[index_found, 'cluster_labels'].values[0]
+    }
+
+    return k_means_clustering_results_dict
+
+
+def get_k_means_best_index(k_means_internal_indices_df: pd.DataFrame):
+    """
+    Determines the best k_means result based on the inertia elbow and other internal indices.
+    """
+
+    index_found = None
+    n_clusters_found = None
+
+    # Computer n_clusters based on Knee of the inertia curve
+    n_clusters_elbow = get_k_means_elbow_n_clusters(k_means_internal_indices_df)
+
+    # Computer n_clusters based on internal indices
     n_clusters_db_score_is_min = k_means_internal_indices_df \
         .loc[k_means_internal_indices_df['davies_bouldin_score'].idxmin(), 'n_clusters']
     print(f'n_clusters_db_score_is_min={n_clusters_db_score_is_min}')
@@ -77,107 +179,25 @@ def clustering(results_dict: dict) -> dict | None:
         .loc[k_means_internal_indices_df['silhouette_score'].idxmax(), 'n_clusters']
     print(f'n_clusters_silhouette_score_is_max={n_clusters_silhouette_score_is_max}')
 
-    test_result = test_k_means_result(n_clusters_found, n_clusters_db_score_is_min,
-                           n_clusters_ch_score_is_max, n_clusters_silhouette_score_is_max)
+    # Test n_clusters found through k_means
+    test_result = test_k_means_result(n_clusters_elbow, n_clusters_db_score_is_min,
+                                      n_clusters_ch_score_is_max, n_clusters_silhouette_score_is_max)
 
     if test_result != 0:
-        n_clusters_found = n_clusters_db_score_is_min if test_result == 2 else n_clusters_found
+        n_clusters_found = n_clusters_db_score_is_min if test_result == 2 else n_clusters_elbow
         index_found = k_means_internal_indices_df[k_means_internal_indices_df['n_clusters'] == n_clusters_found].index
 
-        return {
-            'algo': 'k_means',
-            'n_clusters_found': n_clusters_found,
-            'n_clusters_db_score_is_min': n_clusters_db_score_is_min,
-            'n_clusters_ch_score_is_max': n_clusters_ch_score_is_max,
-            'n_clusters_silhouette_score_is_max': n_clusters_silhouette_score_is_max,
-            'silhouette_score': k_means_internal_indices_df.loc[index_found, 'silhouette_score'].values[0],
-            'hopkins_statistic': k_means_internal_indices_df.loc[index_found, 'hopkins_statistic'].values[0],
-            'umap_n_neighbors': results_dict['n_neighbors'],
-            'umap_min_dist': results_dict['min_dist'],
-            'umap_metric': results_dict['metric'],
-            'umap_n_components': results_dict['n_components'],
-            'trustworthiness': results_dict['trustworthiness'],
-            'fitted_k_means': k_means_internal_indices_df.loc[index_found, 'fitted_k_means'].values[0],
-            'embedding': embedding,
-            'cluster_labels': k_means_internal_indices_df.loc[index_found, 'cluster_labels'].values[0]
-        }
-
-    else:
-        print(f'\nTry applying DBSCAN method:')
-
-        embedding = results_dict['embedding'].copy()
-        k_list = [3, 4, 5, 6]
-        eps_factor_list = np.arange(0.5, 1.8, 0.1)
-
-        dbscan_internal_indices_df = perform_dbscan_and_get_internal_indices(
-            embedding,
-            k_list,
-            eps_factor_list,
-            results_dict['metric']
-        )
-
-        index_found = get_dbscan_best_index(dbscan_internal_indices_df)
-
-        if index_found is None:
-            return None
-
-        n_clusters_found = dbscan_internal_indices_df.loc[index_found, 'n_clusters']
-        eps = dbscan_internal_indices_df.loc[index_found, 'f_eps']
-        dbscan_min_samples = dbscan_internal_indices_df.loc[index_found, 'min_samples']
-
-        print(
-            f'\033[92mSucceed\033[0m to find n_clusters={n_clusters_found}, eps={eps}, min_samples={dbscan_min_samples}')
-
-        return {
-            'algo': 'dbscan',
-            'eps': eps,
-            'dbscan_min_samples': dbscan_min_samples,
-            'n_clusters_found': n_clusters_found,
-            'validity_index': dbscan_internal_indices_df.loc[index_found, 'validity_index'],
-            'hopkins_statistic': dbscan_internal_indices_df.loc[index_found, 'hopkins_statistic'],
-            'umap_n_neighbors': results_dict['n_neighbors'],
-            'umap_min_dist': results_dict['min_dist'],
-            'umap_metric': results_dict['metric'],
-            'umap_n_components': results_dict['n_components'],
-            'trustworthiness': results_dict['trustworthiness'],
-            'fitted_dbscan': dbscan_internal_indices_df.loc[index_found, 'fitted_dbscan'],
-            'embedding': embedding,
-            'cluster_labels': dbscan_internal_indices_df.loc[index_found, 'cluster_labels']
-        }
+    return {
+        'n_clusters_elbow': n_clusters_elbow,
+        'n_clusters_db_score_is_min': n_clusters_db_score_is_min,
+        'n_clusters_ch_score_is_max': n_clusters_ch_score_is_max,
+        'n_clusters_silhouette_score_is_max': n_clusters_silhouette_score_is_max,
+        'n_clusters_found': n_clusters_found,
+        'index_found': index_found
+    }
 
 
-def perform_k_means_and_get_internal_indices(cap_x: np.ndarray, n_clusters_list: list[int],
-                                             random_state: int = 42) -> pd.DataFrame:
-    """
-    Performs k-means clustering and return the internal indices dataframe.
-    """
-
-    internal_indices = []
-
-    for n_clusters in n_clusters_list:
-        cap_x_copy = cap_x.copy()
-        kmeans = KMeans(
-            n_clusters=n_clusters,
-            n_init='auto',
-            random_state=random_state
-        )
-        kmeans.fit_predict(cap_x_copy)
-
-        internal_indices.append({
-            'n_clusters': n_clusters,
-            'inertia': kmeans.inertia_,
-            'calinski_harabasz_score': calinski_harabasz_score(cap_x_copy, kmeans.labels_),
-            'davies_bouldin_score': davies_bouldin_score(cap_x_copy, kmeans.labels_),
-            'silhouette_score': silhouette_score(cap_x_copy, kmeans.labels_),
-            'hopkins_statistic': get_hopkins_statistic(cap_x_copy),
-            'fitted_k_means': kmeans,
-            'cluster_labels': kmeans.labels_
-        })
-
-    return pd.DataFrame(internal_indices)
-
-
-def get_k_means_best_n_clusters(k_means_internal_indices_df: pd.DataFrame, plot: bool = False) -> int | None:
+def get_k_means_elbow_n_clusters(k_means_internal_indices_df: pd.DataFrame, plot: bool = False) -> int | None:
     """
     Identifies the optimal number of clusters for k-means clustering using the elbow method.
     """
@@ -266,8 +286,8 @@ def get_hopkins_statistic(cap_x: np.ndarray) -> float:
     """
 
     randomly_distributed_data = get_randomly_distributed_data(cap_x)
-    cap_x_nn_dist_list = get_nearest_neighbor_distance(cap_x, 1)
-    randomly_distributed_data_nn_dist_list = get_nearest_neighbor_distance(randomly_distributed_data, 1)
+    cap_x_nn_dist_list = get_nearest_neighbor_distance(cap_x, k=1)
+    randomly_distributed_data_nn_dist_list = get_nearest_neighbor_distance(randomly_distributed_data, k=1)
 
     return sum(cap_x_nn_dist_list) / (sum(randomly_distributed_data_nn_dist_list) + sum(cap_x_nn_dist_list))
 
@@ -303,24 +323,31 @@ def get_nearest_neighbor_distance(cap_x: np.ndarray, k: int) -> list:
 
 
 def perform_dbscan_and_get_internal_indices(
-        cap_x: np.ndarray,
-        k_list: list,
-        eps_factor_list: np.ndarray,
+        embedding: np.ndarray,
+        k_list: list[int] = None,
+        eps_factor_list: list[float] = None,
         metric: str = 'euclidean') -> pd.DataFrame:
     """
     Performs DBSCAN clustering and return the internal indices dataframe.
     """
 
+    if k_list is None:
+        k_list = [3, 4, 5, 6]
+
+    if eps_factor_list is None:
+        eps_factor_list = list(np.arange(0.5, 1.8, 0.2))
+
     internal_indices = []
 
-    eps_k_df = get_eps_k_df(cap_x, k_list)
-    max_eps = eps_k_df.eps.values.max()
+    eps_k_df = get_eps_k_df(embedding, k_list)
+    max_eps = eps_k_df['eps'].values.max()
     min_samples = eps_k_df.loc[eps_k_df.eps == max_eps, 'k'].values[0]
+
     print(eps_k_df)
     print(f'max_eps: {max_eps}, min_samples: {min_samples}')
 
     for factor in eps_factor_list:
-        cap_x_copy = cap_x.copy()
+        embedding_copy = embedding.copy()
         f_eps = factor * max_eps
 
         metric = 'cityblock' if metric == 'manhattan' else 'euclidean'
@@ -330,7 +357,7 @@ def perform_dbscan_and_get_internal_indices(
             min_samples=min_samples,
             metric=metric
         )
-        dbscan.fit(cap_x_copy)
+        dbscan.fit(embedding_copy)
 
         clusters = np.unique(dbscan.labels_)
         n_clusters = clusters[clusters != -1].shape[0]
@@ -338,9 +365,12 @@ def perform_dbscan_and_get_internal_indices(
             continue
 
         try:
-            validity_index = dbcv_hdbscan.validity_index(cap_x_copy.astype(np.float64), dbscan.labels_)
-        except ValueError as e:
-            print(e)
+            validity_index = dbcv_hdbscan.validity_index(
+                X=embedding_copy.astype(np.float64),
+                labels=dbscan.labels_,
+                metric=metric
+            )
+        except ValueError:
             validity_index = np.nan
 
         if np.isnan(validity_index):
@@ -352,12 +382,47 @@ def perform_dbscan_and_get_internal_indices(
             'min_samples': min_samples,
             'n_clusters': n_clusters,
             'validity_index': validity_index,
-            'hopkins_statistic': get_hopkins_statistic(cap_x_copy),
+            'hopkins_statistic': get_hopkins_statistic(embedding_copy),
             'fitted_dbscan': dbscan,
             'cluster_labels': dbscan.labels_
         })
 
     return pd.DataFrame(internal_indices)
+
+
+def get_dbscan_clustering_results_dict(dbscan_internal_indices_df: pd.DataFrame, umap_results_dict: dict) -> dict | None:
+    """
+    Generate results dict based on the best DBSCAN clustering index.
+    """
+
+    index_found = get_dbscan_best_index(dbscan_internal_indices_df)
+    if index_found is None:
+        return None
+
+    n_clusters_found = dbscan_internal_indices_df.loc[index_found, 'n_clusters']
+    eps = dbscan_internal_indices_df.loc[index_found, 'f_eps']
+    dbscan_min_samples = dbscan_internal_indices_df.loc[index_found, 'min_samples']
+
+    print(f'\033[92mSucceed\033[0m to find n_clusters={n_clusters_found}, eps={eps}, min_samples={dbscan_min_samples}')
+
+    dbscan_clustering_results_dict = {
+        'algo': 'dbscan',
+        'eps': eps,
+        'dbscan_min_samples': dbscan_min_samples,
+        'n_clusters_found': n_clusters_found,
+        'validity_index': dbscan_internal_indices_df.loc[index_found, 'validity_index'],
+        'hopkins_statistic': dbscan_internal_indices_df.loc[index_found, 'hopkins_statistic'],
+        'umap_n_neighbors': umap_results_dict['n_neighbors'],
+        'umap_min_dist': umap_results_dict['min_dist'],
+        'umap_metric': umap_results_dict['metric'],
+        'umap_n_components': umap_results_dict['n_components'],
+        'trustworthiness': umap_results_dict['trustworthiness'],
+        'fitted_dbscan': dbscan_internal_indices_df.loc[index_found, 'fitted_dbscan'],
+        'embedding': umap_results_dict['embedding'].copy(),
+        'cluster_labels': dbscan_internal_indices_df.loc[index_found, 'cluster_labels']
+    }
+
+    return dbscan_clustering_results_dict
 
 
 def get_dbscan_best_index(dbscan_internal_indices_df: pd.DataFrame) -> int | None:
@@ -424,22 +489,22 @@ def get_eps_k_df(cap_x: np.ndarray, k_list: list[int], drop_first_percent: float
     return pd.DataFrame(df_row_dict_list)
 
 
-def select_and_plot_best_k_means(results_df: pd.DataFrame) -> any:
+def select_best_k_means_from_clustering_results(clustering_results_df: pd.DataFrame) -> (KMeans, int):
     """
     Selects the best k-means clustering result based on silhouette score and generates a plot.
     """
 
-    best_k_means_index = results_df[results_df['algo'] == 'k_means']['silhouette_score'].idxmax()
-    best_k_means = results_df.loc[best_k_means_index, 'fitted_k_means']
-    best_k_means_embedding = results_df.loc[best_k_means_index, 'embedding']
+    best_k_means_index = clustering_results_df[clustering_results_df['algo'] == 'k_means']['silhouette_score'].idxmax()
+    best_k_means = clustering_results_df.loc[best_k_means_index, 'fitted_k_means']
+    best_k_means_embedding = clustering_results_df.loc[best_k_means_index, 'embedding']
 
-    if results_df.loc[best_k_means_index, 'umap_n_components'] == 2:
+    if clustering_results_df.loc[best_k_means_index, 'umap_n_components'] == 2:
         plot_k_means(best_k_means, best_k_means_embedding)
 
     return best_k_means, best_k_means_index
 
 
-def plot_k_means(k_means: any, cap_x: np.ndarray) -> None:
+def plot_k_means(k_means: KMeans, embedding: np.ndarray) -> None:
     """
     Plots the k-means clustering results, showing clusters and their centroids.
     """
@@ -449,48 +514,48 @@ def plot_k_means(k_means: any, cap_x: np.ndarray) -> None:
     n_clusters = len(np.unique(labels))
 
     for cluster in range(n_clusters):
-        cluster_points = cap_x[labels == cluster]
+        cluster_points = embedding[labels == cluster]
 
         plt.scatter(
-            cluster_points[:, 0],
-            cluster_points[:, 1],
+            x=cluster_points[:, 0],
+            y=cluster_points[:, 1],
             label=f'Cluster {cluster}',
             s=20
         )
 
     plt.scatter(
-        centroids[:, 0],
-        centroids[:, 1],
+        x=centroids[:, 0],
+        y=centroids[:, 1],
         marker='x',
         s=100,
         c='black',
         label='Centroids'
     )
 
-    plt.xlabel('$x_1$')
-    plt.ylabel('$x_2$', rotation=0)
-    plt.title(f'n_clusters={n_clusters}\nK-Means Clustering')
+    plt.xlabel('$x_1$', fontsize=14)
+    plt.ylabel('$x_2$', rotation=0, fontsize=14)
+    plt.title(f'n_clusters={n_clusters}\nK-Means Clustering', fontsize=14)
     plt.grid(True)
     plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.show()
 
 
-def select_and_plot_best_dbscan(results_df: pd.DataFrame) -> any:
+def select_best_dbscan_from_clustering_results(clustering_results_df: pd.DataFrame) -> (DBSCAN, int):
     """
     Selects the best DBSCAN clustering result based on validity index and generates a plot.
     """
 
-    best_dbscan_index = results_df[results_df['algo'] == 'dbscan']['validity_index'].idxmax()
-    best_dbscan = results_df.loc[best_dbscan_index, 'fitted_dbscan']
-    best_dbscan_embedding = results_df.loc[best_dbscan_index, 'embedding']
+    best_dbscan_index = clustering_results_df[clustering_results_df['algo'] == 'dbscan']['validity_index'].idxmax()
+    best_dbscan = clustering_results_df.loc[best_dbscan_index, 'fitted_dbscan']
+    best_dbscan_embedding = clustering_results_df.loc[best_dbscan_index, 'embedding']
 
-    if results_df.loc[best_dbscan_index, 'umap_n_components'] == 2:
+    if clustering_results_df.loc[best_dbscan_index, 'umap_n_components'] == 2:
         plot_dbscan(best_dbscan, best_dbscan_embedding)
 
     return best_dbscan, best_dbscan_index
 
 
-def plot_dbscan(dbscan: any, cap_x: np.ndarray) -> None:
+def plot_dbscan(dbscan: DBSCAN, embedding: np.ndarray) -> None:
     """
     Plots the DBSCAN clustering results, highlighting core, border, and noise points.
     """
@@ -501,30 +566,30 @@ def plot_dbscan(dbscan: any, cap_x: np.ndarray) -> None:
     border_mask = ~(core_mask | anomalies_mask)
 
     cores = dbscan.components_
-    anomalies = cap_x[anomalies_mask]
-    non_cores = cap_x[border_mask]
+    anomalies = embedding[anomalies_mask]
+    non_cores = embedding[border_mask]
 
     if cores.shape[0] > 0:
-        plt.scatter(cores[:, 0], cores[:, 1], marker='*', s=20, c=dbscan.labels_[core_mask], label='core')
+        plt.scatter(x=cores[:, 0], y=cores[:, 1], marker='*', s=20, c=dbscan.labels_[core_mask], label='core')
 
     if anomalies.shape[0] > 0:
-        plt.scatter(anomalies[:, 0], anomalies[:, 1], c="r", marker="x", s=100, label='anomalies')
+        plt.scatter(x=anomalies[:, 0], y=anomalies[:, 1], c="r", marker="x", s=100, label='anomalies')
 
     if non_cores.shape[0] > 0:
-        plt.scatter(non_cores[:, 0], non_cores[:, 1], c=dbscan.labels_[border_mask], marker=".", label='border')
+        plt.scatter(x=non_cores[:, 0], y=non_cores[:, 1], c=dbscan.labels_[border_mask], marker=".", label='border')
 
     clusters = np.unique(dbscan.labels_)
     n_clusters = len(clusters[clusters != -1])
 
-    plt.xlabel("$x_1$")
-    plt.ylabel("$x_2$", rotation=0)
-    plt.title(f"eps={dbscan.eps:.2f}, min_samples={dbscan.min_samples}, n_clusters={n_clusters}\nDBSCAN Clustering")
+    plt.xlabel("$x_1$", fontsize=14)
+    plt.ylabel("$x_2$", rotation=0, fontsize=14)
+    plt.title(f"eps={dbscan.eps:.2f}, min_samples={dbscan.min_samples}, n_clusters={n_clusters}\nDBSCAN Clustering", fontsize=14)
     plt.grid()
-    plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    plt.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=14)
     plt.show()
 
 
-def select_latent_manifold(results_df: pd.DataFrame, best_k_means_index: int, best_dbscan_index: int):
+def select_latent_manifold(results_df: pd.DataFrame, best_k_means_index: int, best_dbscan_index: int) -> int:
     """
     Selects the best clustering result between k-means and DBSCAN based on clustering metrics.
     """
@@ -539,210 +604,29 @@ def select_latent_manifold(results_df: pd.DataFrame, best_k_means_index: int, be
                                  results_df.loc[best_dbscan_index, 'validity_index'] else best_dbscan_index
 
 
-def get_latent_manifold_details(results_df: pd.DataFrame, best_index: int) -> pd.DataFrame:
+def get_latent_manifold_details(clustering_results_df: pd.DataFrame, best_index: int) -> pd.DataFrame:
     """
     Retrieves details of the selected clustering result for further analysis or reporting.
     """
 
     try:
-        n_clusters_db_score_is_min = results_df.loc[best_index, 'n_clusters_db_score_is_min']
-        n_clusters_ch_score_is_max = results_df.loc[best_index, 'n_clusters_ch_score_is_max']
-        n_clusters_silhouette_score_is_max = results_df.loc[best_index, 'n_clusters_silhouette_score_is_max']
-        silhouette_score = results_df.loc[best_index, 'silhouette_score']
+        silhouette_score = clustering_results_df.loc[best_index, 'silhouette_score']
     except KeyError:
-        n_clusters_db_score_is_min = None
-        n_clusters_ch_score_is_max = None
-        n_clusters_silhouette_score_is_max = None
         silhouette_score = None
 
     try:
-        eps = results_df.loc[best_index, 'eps']
-        dbscan_min_samples = results_df.loc[best_index, 'dbscan_min_samples']
-        validity_index = results_df.loc[best_index, 'validity_index']
+        validity_index = clustering_results_df.loc[best_index, 'validity_index']
     except KeyError:
-        eps = None
-        dbscan_min_samples = None
         validity_index = None
 
     return pd.DataFrame([{
-        'number of classes in the digits data set': 10,
-        'UMAP n_components': results_df.loc[best_index, 'umap_n_components'],
-        'UMAP min_dist': results_df.loc[best_index, 'umap_min_dist'],
-        'UMAP n_neighbors': results_df.loc[best_index, 'umap_n_neighbors'],
-        'UMAP metric': results_df.loc[best_index, 'umap_metric'],
-        'trustworthiness': results_df.loc[best_index, 'trustworthiness'],
-        'clustering algorithm': results_df.loc[best_index, 'algo'],
-        'number of clusters found': results_df.loc[best_index, 'n_clusters_found'],
-        'validity index or silhouette score': validity_index if results_df.loc[best_index, 'algo'] == 'dbscan' else silhouette_score,
-        # 'n_clusters_db_score_is_min': n_clusters_db_score_is_min,
-        # 'n_clusters_ch_score_is_max': n_clusters_ch_score_is_max,
-        # 'n_clusters_silhouette_score_is_max': n_clusters_silhouette_score_is_max,
-        # 'hopkins_statistic': results_df.loc[best_index, 'hopkins_statistic'],
-        # 'eps': eps,
-        # 'dbscan_min_samples': dbscan_min_samples,
-        # 'validity_index': validity_index
+        'number of classes in data set': 4,
+        'UMAP n_components': clustering_results_df.loc[best_index, 'umap_n_components'],
+        'UMAP min_dist': clustering_results_df.loc[best_index, 'umap_min_dist'],
+        'UMAP n_neighbors': clustering_results_df.loc[best_index, 'umap_n_neighbors'],
+        'UMAP metric': clustering_results_df.loc[best_index, 'umap_metric'],
+        'trustworthiness': clustering_results_df.loc[best_index, 'trustworthiness'],
+        'clustering algorithm': clustering_results_df.loc[best_index, 'algo'],
+        'number of clusters found': clustering_results_df.loc[best_index, 'n_clusters_found'],
+        'validity index or silhouette score': validity_index if clustering_results_df.loc[best_index, 'algo'] == 'dbscan' else silhouette_score,
     }])
-
-
-def get_external_indices(labels_true: np.ndarray, labels_pred: np.ndarray, algo: str) -> pd.DataFrame:
-
-    labels_true_copy = labels_true.copy()
-    labels_pred_copy = labels_pred.copy()
-    non_noise_indices = None
-
-    if algo == 'dbscan':
-        return_dict = remove_noise_data_objects_from_labels(labels_true_copy, labels_pred_copy)
-        labels_true_copy = return_dict['labels_true']
-        labels_pred_copy = return_dict['labels_pred']
-        non_noise_indices = return_dict['non_noise_indices']
-
-    rand_score_ = rand_score(labels_true_copy, labels_pred_copy)
-    print('rand_score: ', rand_score_)
-
-    adjusted_rand_score_ = adjusted_rand_score(labels_true_copy, labels_pred_copy)
-    print('adjusted_rand_score: ', adjusted_rand_score_)
-
-    if len(labels_pred_copy) <= 5:
-        best_cluster_label_permutation = get_best_cluster_label_permutation(labels_true_copy, labels_pred_copy)
-    else:
-        best_cluster_label_permutation = get_approx_best_cluster_label_permutation(labels_true_copy, labels_pred_copy)
-
-    print('best_contingency_matrix:\n', best_cluster_label_permutation['best_contingency_matrix'])
-
-    return pd.DataFrame([{
-        'rand_score': rand_score_,
-        'adjusted_rand_score': adjusted_rand_score_,
-        'best_perm_labels_pred': best_cluster_label_permutation['best_perm_labels_pred'],
-        'best_contingency_matrix': best_cluster_label_permutation['best_contingency_matrix'],
-        'non_noise_indices': non_noise_indices
-    }])
-
-
-def get_best_cluster_label_permutation(labels_true: np.ndarray, labels_pred: np.ndarray) -> dict:
-    best_permutation_mapping = None
-    best_perm_labels_pred = None
-    best_contingency_matrix = None
-
-    max_contingency_matrix_trace = 0
-    for cluster_labels in itertools.permutations(set(labels_pred)):
-
-        mapping = dict(zip(set(labels_pred), cluster_labels))
-        perm_labels_pred = [mapping[label] for label in labels_pred]
-
-        contingency_matrix_ = contingency_matrix(labels_true, perm_labels_pred)
-        contingency_matrix_trace = np.trace(contingency_matrix_)
-
-        if contingency_matrix_trace > max_contingency_matrix_trace:
-            max_contingency_matrix_trace = contingency_matrix_trace
-            best_permutation_mapping = mapping
-            best_perm_labels_pred = perm_labels_pred
-            best_contingency_matrix = contingency_matrix_
-
-    return {
-        'best_permutation_mapping': best_permutation_mapping,
-        'best_perm_labels_pred': best_perm_labels_pred,
-        'best_contingency_matrix': best_contingency_matrix
-    }
-
-
-def get_approx_best_cluster_label_permutation(labels_true: np.ndarray, labels_pred: np.ndarray) -> dict:
-    """
-    This algorithm assume the max count in one contingency matrix represents
-    the largest group of items that have the same true label and were assigned the same predicted label.
-    It iteratively removes current largest count in contingency matrix to find a
-    relatively good permutation result, which has less computational complexity than
-    the exhaustive permutation method.
-    """
-
-    best_permutation_mapping = {}
-    best_perm_labels_pred = np.full_like(labels_pred, fill_value=-1)
-
-    # Compute the initial contingency matrix
-    initial_matrix = contingency_matrix(labels_true, labels_pred)
-    true_labels = np.unique(labels_true)
-    pred_labels = np.unique(labels_pred)
-
-    for _ in range(min(len(true_labels), len(pred_labels))):
-        # Find the indices of the max count in the contingency matrix
-        true_idx, pred_idx = divmod(initial_matrix.argmax(), initial_matrix.shape[1])
-
-        # The corresponding true and pred label at the max count position
-        true_label = true_labels[true_idx]
-        pred_label = pred_labels[pred_idx]
-
-        # Update best_permutation_mapping and best_perm_labels_pred
-        best_permutation_mapping[pred_label] = true_label
-        best_perm_labels_pred[labels_pred == pred_label] = true_label
-
-        # Zero out the current row and column
-        initial_matrix[true_idx, :] = 0
-        initial_matrix[:, pred_idx] = 0
-
-    # Get final best_contingency matrix
-    best_contingency_matrix = contingency_matrix(labels_true, best_perm_labels_pred)
-
-    return {
-        'best_permutation_mapping': best_permutation_mapping,
-        'best_perm_labels_pred': best_perm_labels_pred,
-        'best_contingency_matrix': best_contingency_matrix
-    }
-
-
-def remove_noise_data_objects_from_labels(labels_true: np.ndarray, labels_pred: np.ndarray) -> dict:
-    labels_true = labels_true.reshape(-1, 1)
-    labels_pred = labels_pred.reshape(-1, 1)
-    labels = np.concatenate((labels_true, labels_pred), axis=1)
-
-    labels = labels[~np.any(labels == -1, axis=1), :]
-
-    return {
-        'labels_true': labels[:, 0],
-        'labels_pred': labels[:, 1],
-        'non_noise_indices': np.where(labels_pred != -1)[0]
-    }
-
-
-def plot_digits(digits: np.ndarray, pred_labels: np.ndarray, digits_per_row: int = 10) -> None:
-    n_digits = len(digits)
-    n_cols = min(n_digits, digits_per_row)
-    n_rows = (n_digits - 1) // digits_per_row + 1
-
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(n_cols * 1.5, n_rows * 1.8),
-        squeeze=False
-    )
-    axes = axes.flatten()
-
-    for i in range(n_digits):
-        ax = axes[i]
-        digit = digits[i].reshape(8, 8)
-        ax.imshow(digit, cmap=mpl.cm.binary)
-        ax.set_title(f'Pred: {pred_labels[i]}')
-        ax.axis('off')
-
-    # Remove empty subplots at the end
-    for ax in axes[n_digits:]:
-        ax.remove()
-
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_digits_by_true_label(merged_df: pd.DataFrame, target: str):
-
-    misclassified = merged_df[merged_df[target] != merged_df['pred_labels']]
-    unique_labels = misclassified[target].unique()
-
-    for label in unique_labels:
-        instances = misclassified[merged_df[target] == label]
-
-        most_common_pred = instances['pred_labels'].value_counts().idxmax()
-        print(f"\nTrue label: {label}, most common incorrect pred: {most_common_pred}")
-
-        digits = instances.drop(columns=['id', target, 'pred_labels']).values
-        if len(digits) > 50:
-            digits = digits[:50]
-        pred_labels = instances['pred_labels'].values
-        plot_digits(digits, pred_labels)
