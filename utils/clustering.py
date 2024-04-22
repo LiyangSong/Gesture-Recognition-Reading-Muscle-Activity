@@ -513,6 +513,7 @@ def plot_k_means(k_means: KMeans, embedding: np.ndarray) -> None:
     centroids = k_means.cluster_centers_
     n_clusters = len(np.unique(labels))
 
+    plt.figure(figsize=(8, 8))
     for cluster in range(n_clusters):
         cluster_points = embedding[labels == cluster]
 
@@ -569,6 +570,7 @@ def plot_dbscan(dbscan: DBSCAN, embedding: np.ndarray) -> None:
     anomalies = embedding[anomalies_mask]
     non_cores = embedding[border_mask]
 
+    plt.figure(figsize=(8, 8))
     if cores.shape[0] > 0:
         plt.scatter(x=cores[:, 0], y=cores[:, 1], marker='*', s=20, c=dbscan.labels_[core_mask], label='core')
 
